@@ -1,0 +1,10 @@
+BixBench3
+Copyright 2026 Edison Scientific
+
+Edison-authored code, prompts, metadata, schemas, grading specifications, and documentation are made available under CC BY-SA 4.0.
+
+The benchmark references and mirrors scientific data produced by third parties. Those files remain subject to the terms of their original authors, repositories, publishers, and depositors. The repository license does not relicense third-party raw reads, reference data, supplementary files, published result artifacts, or proprietary software.
+
+Cell Ranger and Cell Ranger ARC are proprietary 10x Genomics software. They are not distributed by this repository or by the BixBench3 data buckets. Users must obtain them directly from 10x Genomics and are responsible for complying with the applicable license.
+
+See THIRD_PARTY_DATA.md and the versioned GCS manifests for file-level provenance.

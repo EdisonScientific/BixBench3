@@ -1,0 +1,38 @@
+{
+  "paper_id": "synthetic",
+  "doi": "10.0000/synthetic",
+  "artifact_count": 1,
+  "artifacts": [
+    {
+      "artifact_id": "counts",
+      "ground_truth": {
+        "path": "artifacts/counts.csv",
+        "format": "csv"
+      },
+      "expected_output": {
+        "path": "outputs/counts.csv",
+        "format": "csv",
+        "row_key": "gene_id"
+      },
+      "grading_method": {
+        "value_columns": [
+          "sample"
+        ],
+        "checks": [
+          {
+            "metric": "f1",
+            "axis": "rows"
+          },
+          {
+            "metric": "ccc",
+            "axis": "columns",
+            "scope": {
+              "columns": "value_columns"
+            }
+          }
+        ],
+        "score_combination": "product"
+      }
+    }
+  ]
+}

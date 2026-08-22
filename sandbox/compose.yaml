@@ -1,0 +1,62 @@
+services:
+  network-gateway:
+    image: ${BIXBENCH3_NETWORK_GATEWAY_IMAGE:?private network gateway image is required}
+    pull_policy: never
+    init: true
+    environment:
+      BIXBENCH3_BROKER_POLICY: /broker/policy.json
+      BIXBENCH3_BROKER_LOG_DIR: /broker/logs
+      BIXBENCH3_BROKER_CACHE_DIR: /broker/cache
+      BIXBENCH3_APPROVED_WEB_DIR: /workspace/approved_web
+      BIXBENCH3_TASK_PROMPT: /task/prompt.md
+      BIXBENCH3_RUNTIME_CASE: /task/case.json
+      BIXBENCH3_BROKER_TOKEN: ${BIXBENCH3_BROKER_TOKEN:?broker token is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OpenAI key is required for adjudication}
+    volumes:
+      - ${BIXBENCH3_BROKER_POLICY:?broker policy is required}:/broker/policy.json:ro
+      - ${BIXBENCH3_BROKER_LOG_DIR:?broker log directory is required}:/broker/logs
+      - ${BIXBENCH3_BROKER_CACHE_DIR:?broker cache directory is required}:/broker/cache
+      - ${BIXBENCH3_WORKSPACE_DIR:?workspace directory is required}:/workspace
+      - ${BIXBENCH3_WORKSPACE_DIR:?workspace directory is required}/../dataset:/task:ro
+    ports:
+      - "127.0.0.1:${BIXBENCH3_BROKER_HOST_PORT:-18080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket, urllib.request; socket.create_connection(('127.0.0.1', 3128), timeout=2).close(); urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      - proxy_egress
+      - agent_isolated
+
+  default:
+    image: ${BIXBENCH3_SANDBOX_IMAGE:?private sandbox image is required}
+    pull_policy: never
+    x-local: true
+    init: true
+    working_dir: /workspace
+    depends_on:
+      network-gateway:
+        condition: service_healthy
+    environment:
+      HTTP_PROXY: http://network-gateway:3128
+      HTTPS_PROXY: http://network-gateway:3128
+      http_proxy: http://network-gateway:3128
+      https_proxy: http://network-gateway:3128
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+    volumes:
+      - ${BIXBENCH3_DATA_DIR:?task data directory is required}:/data:ro
+      - ${BIXBENCH3_WORKSPACE_DIR:?workspace directory is required}:/workspace
+      - ${BIXBENCH3_OUTPUTS_DIR:?outputs directory is required}:/outputs
+    networks:
+      - agent_isolated
+
+networks:
+  proxy_egress:
+  agent_isolated:
+    internal: true

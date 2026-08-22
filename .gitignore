@@ -1,0 +1,16 @@
+.DS_Store
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.egg-info/
+*.py[cod]
+build/
+dist/
+runs/
+operator-cache/
+.cursor-loop/
+.cursor/
+cellranger-*.tar.gz

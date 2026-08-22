@@ -1,0 +1,88 @@
+sections:
+  - title: Build tooling
+    packages:
+      - build-essential
+      - gfortran
+      - make
+      - cmake
+      - pkg-config
+    description: Compilers and build helpers for source package installation.
+  - title: Archive and download utilities
+    packages:
+      - wget
+      - curl
+      - aria2
+      - rsync
+      - unzip
+      - zip
+      - tar
+      - pigz
+      - jq
+    description: Common command-line tools for fetching, unpacking, and inspecting files.
+  - title: Core development libraries
+    packages:
+      - libcurl4-openssl-dev
+      - libssl-dev
+      - libxml2-dev
+      - zlib1g-dev
+      - libbz2-dev
+      - liblzma-dev
+      - libzstd-dev
+      - libhdf5-dev
+      - libgit2-dev
+    description: Header libraries used by common Python, R, and bioinformatics packages.
+  - title: Plot, font, and image libraries
+    packages:
+      - libpng-dev
+      - libjpeg-dev
+      - libtiff-dev
+      - libfreetype6-dev
+      - libfontconfig1-dev
+      - libharfbuzz-dev
+      - libfribidi-dev
+      - libcairo2-dev
+    description: Graphics libraries used by plotting and reporting packages.
+  - title: Java
+    packages:
+      - openjdk-17-jre-headless
+    description: Java runtime for Java-based bioinformatics tools and workflow helpers.
+  - title: Python
+    packages:
+      - python3
+      - python3-pip
+      - uv
+      - numpy
+      - pandas
+      - scipy
+      - scikit-learn
+      - statsmodels
+      - pyarrow
+      - h5py
+      - matplotlib
+      - biopython
+      - pysam
+    description: Python runtime, package installer, scientific stack, and core bioinformatics libraries.
+  - title: R
+    packages:
+      - r-base
+      - r-base-dev
+      - BiocManager
+      - data.table
+      - dplyr
+      - readr
+      - tidyr
+      - ggplot2
+      - Matrix
+      - remotes
+      - pak
+    description: R runtime, build support, package installers, and common data-wrangling packages.
+  - title: Conda-compatible package management
+    packages:
+      - micromamba
+      - mamba
+    description: Micromamba is configured with conda-forge, bioconda, and defaults channels.
+  - title: 10x Genomics single-cell tools
+    packages:
+      - cellranger 6.0.2
+      - cellranger-arc 2.0.2
+    description: User-supplied licensed 10x Genomics tools installed into the private runtime image.

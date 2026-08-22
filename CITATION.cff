@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use BixBench3, cite this software release. The benchmark paper is forthcoming."
+title: "BixBench3"
+type: software
+version: 1.0.0
+date-released: 2026-07-22
+authors:
+  - name: "Edison Scientific"
+repository-code: "https://github.com/EdisonScientific/BixBench3"
+license: "CC-BY-SA-4.0"

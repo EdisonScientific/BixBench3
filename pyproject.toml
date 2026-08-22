@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bixbench3"
+version = "1.0.0"
+description = "Public harness and deterministic grader for BixBench3."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "CC-BY-SA-4.0"
+authors = [{ name = "Edison Scientific" }]
+keywords = [
+  "benchmark",
+  "bioinformatics",
+  "computational-biology",
+  "llm-agents",
+  "reproducibility",
+]
+dependencies = [
+    "anthropic==0.102.0",
+    "google-genai==2.2.0",
+    "httpx==0.28.1",
+    "huggingface-hub",
+    "inspect-ai==0.3.220",
+    "numpy==2.4.4",
+    "openai==2.36.0",
+    "pandas==3.0.3",
+    "pyarrow==24.0.0",
+    "pydantic==2.13.4",
+    "pyyaml==6.0.3",
+    "scipy==1.17.1",
+]
+
+[project.scripts]
+bixbench3 = "bixbench3.cli:main"
+
+[project.urls]
+Repository = "https://github.com/EdisonScientific/BixBench3"
+Dataset = "https://huggingface.co/datasets/EdisonScientific/BixBench3"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bixbench3"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+files = ["src/bixbench3"]
+
+[[tool.mypy.overrides]]
+module = ["inspect_ai.*", "pandas.*", "scipy.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pandas-stubs",
+    "pytest",
+    "ruff",
+    "types-pyyaml",
+]
