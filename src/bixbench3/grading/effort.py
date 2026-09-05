@@ -15,6 +15,8 @@ def resolve_reasoning_effort(model_name: str, effort_name: str) -> str:
         return "xhigh" if normalized == "max" else normalized
     if "grok-4.5" in lowered:
         return "high" if normalized in {"xhigh", "max"} else normalized
+    if "grok-4.6" in lowered:
+        return "xhigh" if normalized == "max" else normalized
     if "openai/" in lowered or lowered.startswith("gpt-"):
         if "gpt-5.6" in lowered or "gpt-6" in lowered:
             return normalized

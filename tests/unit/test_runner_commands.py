@@ -92,8 +92,8 @@ def test_score_only_plan_has_fixed_vm_and_no_service_account(
     assert "--machine-type=n2-standard-32" in create
     assert "--boot-disk-size=500GB" in create
     assert (
-        "--source-machine-image=projects/example-project/global/machineImages/"
-        "bixbench3-runtime-v1-0-0-r7"
+        "--image=projects/example-project/global/images/"
+            "bixbench3-runtime-v1-0-0-r9"
     ) in create
     assert "--no-service-account" in create
     assert "--no-scopes" in create

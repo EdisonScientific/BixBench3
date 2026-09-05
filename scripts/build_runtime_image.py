@@ -1,4 +1,4 @@
-"""Build the private BixBench3 runtime machine image."""
+"""Build the private BixBench3 runtime custom image."""
 
 from __future__ import annotations
 

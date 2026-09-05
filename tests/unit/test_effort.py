@@ -30,6 +30,8 @@ from bixbench3.grading.effort import (
         ("z-ai/glm-5.2", "max", "xhigh"),
         ("xai/grok-4.5", "max", "high"),
         ("openrouter/x-ai/grok-4.5", "xhigh", "high"),
+        ("grok/grok-4.6", "max", "xhigh"),
+        ("grok/grok-4.6", "xhigh", "xhigh"),
         ("openrouter/moonshotai/kimi-k3", "max", "max"),
         ("anthropic/claude-opus-4-8", "max", "max"),
         ("anthropic/claude-opus-4-8", "extra-high", "xhigh"),

@@ -14,9 +14,11 @@ from bixbench3.config import (
 def test_reference_catalog_contains_reported_models() -> None:
     catalog = load_reference_catalog()
 
-    assert len(catalog.models) == 13
+    assert len(catalog.models) == 15
     assert "openai/gpt-5.5" in catalog.models
     assert "openai/gpt-6-astra" in catalog.models
+    assert "grok/grok-4.6" in catalog.models
+    assert "openrouter/meta/muse-spark-1.3" in catalog.models
     assert "anthropic/claude-opus-4-8" in catalog.models
     assert "anthropic/claude-fable-5" in catalog.models
     assert "openrouter/z-ai/glm-5.2" in catalog.models
@@ -52,9 +54,9 @@ def test_reference_catalog_contains_reported_models() -> None:
             ("--effort", "max"),
         ),
         (
-            "xai/grok-4.5",
-            "high",
-            ("--reasoning-effort", "high"),
+            "grok/grok-4.6",
+            "xhigh",
+            ("--reasoning-effort", "xhigh"),
         ),
         (
             "openrouter/deepseek/deepseek-v4-flash",

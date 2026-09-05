@@ -59,9 +59,10 @@ Export the provider key for the model you want to test. The benchmark network ad
 ```bash
 export OPENAI_API_KEY=...
 export ANTHROPIC_API_KEY=...
+export XAI_API_KEY=...
 ```
 
-Other supported provider variables are `GOOGLE_API_KEY` and `OPENROUTER_API_KEY`. Keys are accepted only through environment variables and are streamed into memory on the VM. 
+Other supported provider variables are `GOOGLE_API_KEY` and `OPENROUTER_API_KEY`. The runtime includes the xAI SDK required by Inspect's native `grok/` provider. Keys are accepted only through environment variables and are streamed into memory on the VM.
 
 ## 4. Obtain licensed 10x software
 
@@ -85,7 +86,7 @@ uv run bixbench3 setup-runtime \
   --cellranger-arc-tarball /path/to/cellranger-arc-2.0.2.tar.gz
 ```
 
-This creates a VM which builds and tests the Docker image, stores it as a private image in your project, and then deletes the VM. The image is versioned with the benchmark release. Each agent runs inside this image in subsequent runs.
+This creates a VM which builds and tests the Docker image, stores its boot disk as a private Compute Engine custom image in your project, and then deletes the VM. The custom image is versioned with the benchmark release and supports parallel worker provisioning without the six-VM-per-hour source limit imposed on machine images. Each agent runs inside this image in subsequent runs.
 
 The build typically takes 30–60 minutes. Add `--dry-run` to validate the archives and inspect the planned cloud operations without creating resources.
 
@@ -179,11 +180,14 @@ Every run requires an explicit effort. `src/bixbench3/reference_models.yaml` rec
 - Google and Gemini `max` or `xhigh` resolve to `high`.
 - OpenRouter GLM 5.2 and DeepSeek V4 Flash resolve `max` to `xhigh`.
 - Grok 4.5 resolves `max` or `xhigh` to its highest supported effort, `high`.
+- Grok 4.6 resolves `max` to its highest supported effort, `xhigh`.
 - OpenRouter Kimi K3 preserves `max`.
 - Claude Fable 5, Claude Opus 5, Claude Opus 4.8, and Claude Sonnet 4.6 use `--effort max`. Claude Fable 5 does not set Anthropic `fallbacks`, so a classifier content restriction is returned as a refusal instead of retrying another model.
 - Claude Haiku 4.5 uses 63,999 reasoning tokens for `max`.
 
 The run manifest records both the requested and resolved effort.
+
+The harness registers current context limits and standard token prices for reference models when Inspect's bundled metadata is stale or missing. This includes 1M-token contexts for Claude Opus 4.8, Claude Fable 5, Claude Sonnet 4.6, and the Gemini reference models; 500K for Grok 4.6; and 1,048,576 for Muse Spark 1.3. Inspect's static cost model does not apply provider pricing tiers triggered by long prompts, so costs for tiered models can be understated after the provider's long-context threshold.
 
 ## Tasks
 

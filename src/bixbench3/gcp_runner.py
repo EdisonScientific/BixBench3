@@ -768,7 +768,7 @@ class GCPRunner:
         )
         self._preflight(require_artifact_registry=False, results_bucket=None)
         print(
-            f"[2/10] checking for existing machine image {plan.image_name}",
+            f"[2/10] checking for existing custom image {plan.image_name}",
             file=sys.stderr,
             flush=True,
         )
@@ -849,7 +849,7 @@ class GCPRunner:
                 ),
             )
             print(
-                f"[9/10] stopping {plan.builder_vm} and saving machine image {plan.image_name}",
+                f"[9/10] stopping {plan.builder_vm} and saving custom image {plan.image_name}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -964,7 +964,7 @@ class GCPRunner:
                 "--project",
                 self.project,
                 "compute",
-                "machine-images",
+                "images",
                 "describe",
                 self.settings.runtime_image_name,
                 "--format=json",
@@ -1172,8 +1172,8 @@ def build_run_commands(
         f"--boot-disk-size={settings.boot_disk_gb}GB",
         "--boot-disk-type=pd-balanced",
         (
-            "--source-machine-image="
-            f"projects/{project}/global/machineImages/{settings.runtime_image_name}"
+            "--image="
+            f"projects/{project}/global/images/{settings.runtime_image_name}"
         ),
         f"--labels={labels},run={slugify(layout.run_id, maximum=20)}",
     ]
@@ -1211,7 +1211,7 @@ def build_run_commands(
         "describe_runtime_image": (
             *base,
             "compute",
-            "machine-images",
+            "images",
             "describe",
             settings.runtime_image_name,
             "--format=json",
@@ -1486,7 +1486,7 @@ def build_runtime_plan(
         "describe_image": (
             *base,
             "compute",
-            "machine-images",
+            "images",
             "describe",
             settings.runtime_image_name,
             "--format=json",
@@ -1521,6 +1521,8 @@ def build_runtime_plan(
             str(source_archive.resolve()),
             f"{builder}:~/bixbench3-source.tar.gz",
             zone,
+            "--scp-flag=-O",
+            "--tunnel-through-iap",
         ),
         "copy_cellranger": (
             *base,
@@ -1529,6 +1531,8 @@ def build_runtime_plan(
             str(cellranger_tarball.resolve()),
             f"{builder}:~/cellranger-6.0.2.tar.gz",
             zone,
+            "--scp-flag=-O",
+            "--tunnel-through-iap",
         ),
         "copy_cellranger_arc": (
             *base,
@@ -1537,6 +1541,8 @@ def build_runtime_plan(
             str(cellranger_arc_tarball.resolve()),
             f"{builder}:~/cellranger-arc-2.0.2.tar.gz",
             zone,
+            "--scp-flag=-O",
+            "--tunnel-through-iap",
         ),
         "build_runtime": ssh_argv(
             base,
@@ -1562,11 +1568,12 @@ def build_runtime_plan(
         "create_image": (
             *base,
             "compute",
-            "machine-images",
+            "images",
             "create",
             settings.runtime_image_name,
-            f"--source-instance={builder}",
-            f"--source-instance-zone={settings.zone}",
+            f"--source-disk={builder}",
+            f"--source-disk-zone={settings.zone}",
+            f"--family={settings.runtime_image_family}",
             (f"--description=BixBench3 {BENCHMARK_VERSION}; runtime hash {build_hash}"),
         ),
         "delete_builder": (
@@ -1940,6 +1947,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import sys
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 manifest_url, mount_text, expected_manifest_sha = sys.argv[1:]
@@ -1956,6 +1964,16 @@ manifest = json.loads(manifest_bytes)
 entries = manifest.get("objects") or manifest.get("files") or manifest.get("artifacts")
 if not isinstance(entries, list):
     raise RuntimeError("input manifest has no object list")
+
+def encoded_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((
+        parts.scheme,
+        parts.netloc,
+        quote(parts.path, safe="/%"),
+        quote(parts.query, safe="=&%"),
+        parts.fragment,
+    ))
 
 def relative_path(entry: dict[str, object]) -> PurePosixPath:
     raw = entry.get("relative_path") or entry.get("object_path") or entry.get("path")
@@ -1984,7 +2002,7 @@ for entry_value in entries:
             continue
         raise RuntimeError(f"existing destination checksum mismatch: {{destination}}")
     partial = destination.with_name(destination.name + ".partial")
-    request = Request(url, headers={{"User-Agent": "bixbench3/{__version__}"}})
+    request = Request(encoded_url(url), headers={{"User-Agent": "bixbench3/{__version__}"}})
     digest = hashlib.sha256()
     with urlopen(request, timeout=120) as response, partial.open("wb") as output:
         while chunk := response.read(8 * 1024 * 1024):

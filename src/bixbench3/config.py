@@ -22,7 +22,7 @@ DEFAULT_ZONE = "us-central1-a"
 DEFAULT_REGION = "us-central1"
 RUN_MACHINE_TYPE = "n2-standard-32"
 RUN_BOOT_DISK_GB = 500
-RUNTIME_IMAGE_NAME = "bixbench3-runtime-v1-0-0-r7"
+RUNTIME_IMAGE_NAME = "bixbench3-runtime-v1-0-0-r9"
 RUNTIME_IMAGE_FAMILY = "bixbench3-runtime"
 REMOTE_ROOT = "/var/lib/bixbench3"
 MESSAGE_LIMIT = 5_000
@@ -43,6 +43,7 @@ _PROVIDER_ENV = {
     "gemini": "GOOGLE_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "grok": "XAI_API_KEY",
     "xai": "XAI_API_KEY",
 }
 
@@ -223,6 +224,8 @@ def _resolve_effort(model_id: str, requested: str) -> str:
         return "xhigh" if requested == "max" else requested
     if "grok-4.5" in lowered:
         return "high" if requested in {"xhigh", "max"} else requested
+    if "grok-4.6" in lowered:
+        return "xhigh" if requested == "max" else requested
     if lowered.startswith("openai/") or lowered.startswith("gpt-"):
         if "gpt-5.6" in lowered or "gpt-6" in lowered:
             return requested
