@@ -175,7 +175,7 @@ The command prints the overall paper score, every artifact score, and each outpu
 
 Every run requires an explicit effort. `src/bixbench3/reference_models.yaml` records the exact models and non-effort settings used in the paper.
 
-- OpenAI GPT-5.6 models preserve native `max` with high verbosity. GPT-5.5 and earlier models resolve `max` to `xhigh` with high verbosity.
+- OpenAI GPT-6 Astra and GPT-5.6 models preserve native `max` with high verbosity. GPT-5.5 and earlier models resolve `max` to `xhigh` with high verbosity.
 - Google and Gemini `max` or `xhigh` resolve to `high`.
 - OpenRouter GLM 5.2 and DeepSeek V4 Flash resolve `max` to `xhigh`.
 - Grok 4.5 resolves `max` or `xhigh` to its highest supported effort, `high`.

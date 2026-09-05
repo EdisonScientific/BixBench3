@@ -14,6 +14,10 @@
       "max": "max",
       "high_xhigh_and_max_verbosity": "high"
     },
+    "openai/gpt-6": {
+      "max": "max",
+      "high_xhigh_and_max_verbosity": "high"
+    },
     "google": {
       "max": "high",
       "xhigh": "high"
@@ -132,6 +136,16 @@
       "version": "gpt-5.5",
       "supported_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
       "model_args": {}
+    },
+    {
+      "id": "openai/gpt-6-astra",
+      "provider": "openai",
+      "provider_env": "OPENAI_API_KEY",
+      "version": "gpt-6-astra",
+      "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "model_args": {
+        "responses_api": true
+      }
     },
     {
       "id": "openrouter/z-ai/glm-5.2",

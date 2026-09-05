@@ -16,6 +16,8 @@ from bixbench3.grading.effort import (
         ("openai/gpt-5.5", "max", "xhigh"),
         ("openai/gpt-5.6-luna", "max", "max"),
         ("gpt-5.6-sol", "maximum", "max"),
+        ("openai/gpt-6-astra", "max", "max"),
+        ("gpt-6-astra", "maximum", "max"),
         ("gpt-5.4-mini", "maximum", "xhigh"),
         ("anthropic/claude-opus-5", "max", "max"),
         ("anthropic/claude-opus-5", "xhigh", "xhigh"),

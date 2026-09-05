@@ -224,7 +224,7 @@ def _resolve_effort(model_id: str, requested: str) -> str:
     if "grok-4.5" in lowered:
         return "high" if requested in {"xhigh", "max"} else requested
     if lowered.startswith("openai/") or lowered.startswith("gpt-"):
-        if "gpt-5.6" in lowered:
+        if "gpt-5.6" in lowered or "gpt-6" in lowered:
             return requested
         return "xhigh" if requested == "max" else requested
     if lowered.startswith("google/") or "gemini" in lowered:
