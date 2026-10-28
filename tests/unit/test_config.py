@@ -14,13 +14,19 @@ from bixbench3.config import (
 def test_reference_catalog_contains_reported_models() -> None:
     catalog = load_reference_catalog()
 
-    assert len(catalog.models) == 15
+    assert len(catalog.models) == 21
+    assert "google/gemini-4-argon" in catalog.models
+    assert "openrouter/meta/muse-wonder" in catalog.models
     assert "openai/gpt-5.5" in catalog.models
+    assert "openai/gpt-6-sol" in catalog.models
+    assert "openai/gpt-6-luna" in catalog.models
     assert "openai/gpt-6-astra" in catalog.models
     assert "grok/grok-4.6" in catalog.models
     assert "openrouter/meta/muse-spark-1.3" in catalog.models
     assert "anthropic/claude-opus-4-8" in catalog.models
+    assert "anthropic/claude-opus-5-5" in catalog.models
     assert "anthropic/claude-fable-5" in catalog.models
+    assert "anthropic/claude-fable-5-1" in catalog.models
     assert "openrouter/z-ai/glm-5.2" in catalog.models
     assert "openrouter/moonshotai/kimi-k3" in catalog.models
 
@@ -34,7 +40,12 @@ def test_reference_catalog_contains_reported_models() -> None:
             ("--reasoning-effort", "xhigh", "--verbosity", "high"),
         ),
         (
-            "openai/gpt-5.6-luna",
+            "openai/gpt-6-luna",
+            "max",
+            ("--reasoning-effort", "max", "--verbosity", "high"),
+        ),
+        (
+            "openai/gpt-6-sol",
             "max",
             ("--reasoning-effort", "max", "--verbosity", "high"),
         ),
@@ -45,6 +56,16 @@ def test_reference_catalog_contains_reported_models() -> None:
         ),
         (
             "anthropic/claude-opus-5",
+            "max",
+            ("--effort", "max"),
+        ),
+        (
+            "anthropic/claude-opus-5-5",
+            "max",
+            ("--effort", "max"),
+        ),
+        (
+            "anthropic/claude-fable-5-1",
             "max",
             ("--effort", "max"),
         ),
@@ -72,6 +93,16 @@ def test_reference_catalog_contains_reported_models() -> None:
             "google/gemini-3.5-flash",
             "high",
             ("--reasoning-effort", "high"),
+        ),
+        (
+            "google/gemini-4-argon",
+            "high",
+            ("--reasoning-effort", "high"),
+        ),
+        (
+            "openrouter/meta/muse-wonder",
+            "max",
+            ("--reasoning-effort", "max"),
         ),
         (
             "openrouter/z-ai/glm-5.2",
@@ -160,6 +191,50 @@ def test_claude_fable_5_is_reference_without_anthropic_fallbacks() -> None:
     assert model.model_args == {}
 
 
+def test_claude_opus_5_5_fallback_is_opt_in() -> None:
+    model = resolve_model("anthropic/claude-opus-5-5", "max")
+    with_fallback = resolve_model(
+        "anthropic/claude-opus-5-5",
+        "max",
+        fallback_model_ids=("anthropic/claude-opus-5",),
+    )
+
+    assert model.fallback_model_ids == ()
+    assert with_fallback.fallback_model_ids == ("anthropic/claude-opus-5",)
+
+
+def test_claude_fable_5_1_can_fallback_to_opus_5() -> None:
+    model = resolve_model(
+        "anthropic/claude-fable-5-1",
+        "max",
+        fallback_model_ids=("anthropic/claude-opus-5",),
+    )
+
+    assert model.is_reference is True
+    assert model.resolved_effort == "max"
+    assert model.inspect_effort_args == ("--effort", "max")
+    assert model.fallback_model_ids == ("anthropic/claude-opus-5",)
+    assert model.required_environment_keys == (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+    )
+
+
+def test_fallback_models_must_be_distinct_first_party_anthropic_models() -> None:
+    with pytest.raises(ValueError, match="first-party Anthropic"):
+        resolve_model(
+            "openai/gpt-6-astra",
+            "max",
+            fallback_model_ids=("anthropic/claude-opus-5",),
+        )
+    with pytest.raises(ValueError, match="cannot also be"):
+        resolve_model(
+            "anthropic/claude-fable-5-1",
+            "max",
+            fallback_model_ids=("anthropic/claude-fable-5-1",),
+        )
+
+
 def test_kimi_k3_is_reference_and_pinned_to_moonshotai() -> None:
     model = resolve_model("openrouter/moonshotai/kimi-k3", "max")
 
@@ -175,6 +250,46 @@ def test_kimi_k3_is_reference_and_pinned_to_moonshotai() -> None:
             "allow_fallbacks": False,
         }
     }
+
+
+def test_muse_wonder_is_reference_and_pinned_to_meta() -> None:
+    model = resolve_model("openrouter/meta/muse-wonder", "max")
+
+    assert model.is_reference is True
+    assert model.resolved_effort == "max"
+    assert model.required_environment_keys == (
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+    )
+    assert model.model_args == {
+        "provider": {
+            "order": ["meta"],
+            "only": ["meta"],
+            "allow_fallbacks": False,
+        }
+    }
+
+
+def test_gemini_4_argon_streams_and_rejects_minimal_effort() -> None:
+    model = resolve_model("google/gemini-4-argon", "max")
+
+    assert model.is_reference is True
+    assert model.required_environment_keys == ("GEMINI_API_KEY", "OPENAI_API_KEY")
+    # streaming raises the per-request output cap from 32k to 64k
+    assert model.model_args == {"streaming": True}
+    with pytest.raises(ValueError, match="does not support effort 'minimal'"):
+        resolve_model("google/gemini-4-argon", "minimal")
+
+
+def test_xai_openrouter_slugs_run_direct_via_grok() -> None:
+    for model_id in ("x-ai/grok-4.6", "xai/grok-4.6"):
+        model = resolve_model(model_id, "max")
+
+        assert model.model_id == "grok/grok-4.6"
+        assert model.provider == "grok"
+        assert model.is_reference is True
+        assert model.resolved_effort == "xhigh"
+        assert model.required_environment_keys == ("XAI_API_KEY", "OPENAI_API_KEY")
 
 
 def test_effort_must_be_explicit_and_known() -> None:

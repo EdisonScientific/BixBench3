@@ -24,6 +24,8 @@ from bixbench3.grading.effort import (
         ("anthropic/claude-fable-5", "max", "max"),
         ("anthropic/claude-fable-5", "xhigh", "xhigh"),
         ("google/gemini-3.5-flash", "max", "high"),
+        ("google/gemini-4-argon", "max", "high"),
+        ("openrouter/meta/muse-wonder", "max", "max"),
         ("openrouter/deepseek/deepseek-v4-flash", "max", "xhigh"),
         ("google/gemini-3-flash-preview", "extra-high", "high"),
         ("openrouter/z-ai/glm-5.2", "max", "xhigh"),

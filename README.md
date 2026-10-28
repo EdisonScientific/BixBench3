@@ -62,7 +62,7 @@ export ANTHROPIC_API_KEY=...
 export XAI_API_KEY=...
 ```
 
-Other supported provider variables are `GOOGLE_API_KEY` and `OPENROUTER_API_KEY`. The runtime includes the xAI SDK required by Inspect's native `grok/` provider. Keys are accepted only through environment variables and are streamed into memory on the VM.
+Other supported provider variables are `GOOGLE_API_KEY` and `OPENROUTER_API_KEY`. The Gemini 4 Argon reference profile requires `GEMINI_API_KEY`. The runtime includes the xAI SDK required by Inspect's native `grok/` provider. Keys are accepted only through environment variables and are streamed into memory on the VM.
 
 ## 4. Obtain licensed 10x software
 
@@ -95,13 +95,15 @@ The build typically takes 30–60 minutes. Add `--dry-run` to validate the archi
 ```bash
 uv run bixbench3 run \
   --task 1 \
-  --model openai/gpt-5.5 \
+  --model anthropic/claude-opus-5-5 \
   --effort max \
   --project YOUR_PROJECT \
   --results-bucket gs://YOUR_BUCKET/bixbench3 # optional
 ```
 
 On the first run of a task, the runner copies that task's raw input data from `gs://bixbench3-inputs` onto a persistent disk in your GCP project, checks the disk against the expected checksum, and attaches it read-only to the VM where the agent will run. Later runs of the same task reuse that disk in your project instead of re-downloading from GCS.
+
+`--fallback-model` is optional and may be repeated to configure up to three ordered first-party Anthropic fallback models. Inspect invokes a fallback only when the primary model's safety classifier declines a request. No reference profile enables fallbacks by default. The fallback receives the same effort setting. The run manifest records the configured models; Inspect logs identify the model used for each call.
 
 After provisioning the VM, `run` starts the benchmark as a detached service and returns. It prints a run ID and exact commands for checking, completing, or cancelling the run. Your workstation does not need to remain connected. Runs take up to 24 hours, with an average of approximately 8 hours.
 
@@ -127,7 +129,7 @@ Local outputs are stored under `runs/{paper_id}/{model_slug}/{timestamp}/`. When
 | `dataset/`                               | Staged one-task prompt and runtime metadata                              | Deleted with the VM                             | Deleted with the VM                                           |
 | `host_ground_truth/`                     | Temporary host-only grading package                                      | Removed after grading, then deleted with the VM | Removed after grading, then deleted with the VM               |
 | `run.sh` and `status.json`               | Detached service script and live phase state                             | Deleted with the VM                             | Deleted with the VM                                           |
-| `/dev/shm/bixbench3.env`                 | In-memory provider API keys                                              | Deleted when the run exits                      | Deleted when the run exits                                    |
+| `/run/bixbench3/credentials.env`         | Root-only provider API keys held in memory during the run               | Deleted when the run exits                      | Deleted when the run exits                                    |
 
 
 
@@ -144,9 +146,15 @@ uv run bixbench3 complete \
   --project YOUR_PROJECT
 ```
 
-You can check the status of a run with `status` and grade it with `complete`.
+You can check the status of a run with `status` and grade it with `complete`. To check all uncollected runs in the project immediately and then every 30 minutes, keep this command running in a persistent terminal:
 
-`status` is read-only and reports the remote phase, exit status, and VM state, including the `grading` and `judging` phases that follow the analyst run. Once it reports `succeeded` or `failed`, run `complete` to copy `grade.json`, `judge.json`, the `artifact_grades/` directory, Inspect logs under `inspect_logs/`, and the final manifest locally and delete the VM. The VM remains running and billable until you complete or cancel it.
+```bash
+uv run bixbench3 monitor --project YOUR_PROJECT
+```
+
+Use `--once` for one check suitable for an external scheduler. Each check lists project run VMs, connects by SSH to running VMs, checks the service and Inspect process, reports orphaned, shut-down, and unreachable VMs, and emits JSON for all runs plus issue and completion flags on stderr. The monitor compares service CPU activity between checks and flags a run that shows no CPU activity for an interval; a quiet model request can be healthy, so investigate that flag before acting. The monitor does not collect grades or delete VMs. It stops checking when the terminal closes unless you run it under a supervisor.
+
+`status` is read-only and reports the remote phase, exit status, and VM state, including the `grading` and `judging` phases that follow the analyst run. Once it reports `succeeded` or `failed`, run `complete` to copy `grade.json`, `judge.json`, the `artifact_grades/` directory, Inspect logs under `inspect_logs/`, and the final manifest locally and delete the VM. For an `issue`, inspect the VM before running `cancel`; a stopped VM must be restarted manually to recover outputs. The VM remains billable until you complete or cancel it.
 
 To stop an active run, collect any available state, and delete its VM:
 
@@ -157,6 +165,8 @@ uv run bixbench3 cancel \
 ```
 
 By default, `complete` copies the overall `grade.json`, process report `judge.json`, per-artifact JSON files under `artifact_grades/`, Inspect logs under `inspect_logs/`, and the run manifest to your local machine. Pass `--results-bucket` when launching to also upload agent outputs, the copied agent artifacts, network broker logs, and the same grade, judge, and Inspect files to a GCS prefix you already own. Without this option, those additional run files are lost when `complete` or `cancel` deletes the VM. The project's default Compute Engine service account must be able to write to that bucket.
+
+Run VMs mask Ubuntu's automatic upgrade services while a benchmark is active so `needrestart` cannot interrupt long biological pipelines by restarting Docker or the benchmark service. Provider keys remain in memory only; a VM reboot interrupts the run and requires manual investigation rather than silently starting a new attempt.
 
 ### Process judging
 
@@ -176,18 +186,19 @@ The command prints the overall paper score, every artifact score, and each outpu
 
 Every run requires an explicit effort. `src/bixbench3/reference_models.yaml` records the exact models and non-effort settings used in the paper.
 
-- OpenAI GPT-6 Astra and GPT-5.6 models preserve native `max` with high verbosity. GPT-5.5 and earlier models resolve `max` to `xhigh` with high verbosity.
-- Google and Gemini `max` or `xhigh` resolve to `high`.
+- OpenAI GPT-6 Sol, Luna, and Astra preserve native `max` with high verbosity. GPT-5.5 and earlier models resolve `max` to `xhigh` with high verbosity.
+- Google and Gemini `max` or `xhigh` resolve to `high`. Gemini 4 Argon streams responses, which raises its per-request output cap from 32K to 64K tokens.
 - OpenRouter GLM 5.2 and DeepSeek V4 Flash resolve `max` to `xhigh`.
+- OpenRouter Muse Wonder and Muse Spark 1.3 preserve `max`. Muse Wonder Full is available only in Meta's Muse Code and cannot be benchmarked through the API.
 - Grok 4.5 resolves `max` or `xhigh` to its highest supported effort, `high`.
 - Grok 4.6 resolves `max` to its highest supported effort, `xhigh`.
 - OpenRouter Kimi K3 preserves `max`.
-- Claude Fable 5, Claude Opus 5, Claude Opus 4.8, and Claude Sonnet 4.6 use `--effort max`. Claude Fable 5 does not set Anthropic `fallbacks`, so a classifier content restriction is returned as a refusal instead of retrying another model.
+- Claude Opus 5.5, Claude Fable 5.1, Claude Fable 5, Claude Opus 5, Claude Opus 4.8, and Claude Sonnet 4.6 use `--effort max`. Anthropic classifier fallbacks are opt-in with `--fallback-model`; without that option, a classifier content restriction remains a refusal.
 - Claude Haiku 4.5 uses 63,999 reasoning tokens for `max`.
 
 The run manifest records both the requested and resolved effort.
 
-The harness registers current context limits and standard token prices for reference models when Inspect's bundled metadata is stale or missing. This includes 1M-token contexts for Claude Opus 4.8, Claude Fable 5, Claude Sonnet 4.6, and the Gemini reference models; 500K for Grok 4.6; and 1,048,576 for Muse Spark 1.3. Inspect's static cost model does not apply provider pricing tiers triggered by long prompts, so costs for tiered models can be understated after the provider's long-context threshold.
+The harness registers current context limits and standard token prices for reference models when Inspect's bundled metadata is stale or missing. This includes 1.05M-token contexts for GPT-6 Sol and Luna; 1M-token contexts for Claude Opus 5.5, Claude Opus 4.8, Claude Fable 5.1, Claude Fable 5, Claude Sonnet 4.6, and the Gemini reference models; 500K for Grok 4.6; and 1,048,576 for Muse Spark 1.3 and Muse Wonder. Gemini 4 Argon is priced at its introductory rate ($2 input, $10 output per million tokens), which rises to $4 and $20 on December 1, 2026. Inspect's static cost model does not apply provider pricing tiers triggered by long prompts, so costs for tiered models can be understated after the provider's long-context threshold.
 
 ## Tasks
 

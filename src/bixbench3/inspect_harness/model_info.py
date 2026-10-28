@@ -1,14 +1,43 @@
 from __future__ import annotations
 
-from inspect_ai.model import ModelCost, ModelInfo, set_model_info
+import base64
+from typing import Any
+
+from inspect_ai.model import (
+    ChatMessage,
+    ChatMessageAssistant,
+    ChatMessageTool,
+    ChatMessageUser,
+    ContentReasoning,
+    GenerateConfig,
+    ModelCost,
+    ModelInfo,
+    set_model_info,
+)
 from inspect_ai.model import _openai as openai_helpers
 from inspect_ai.model._openai import is_gpt_5_model as _inspect_is_gpt_5_model
 from inspect_ai.model._providers import openai as openai_provider
 from inspect_ai.model._providers.anthropic import AnthropicAPI
+from inspect_ai.model._providers.google import GoogleGenAIAPI
 from inspect_ai.model._providers.grok import GrokAPI
+from inspect_ai.model._providers.openrouter import OpenRouterAPI
+from inspect_ai.model._tokens import count_text_tokens as _tiktoken_count_text_tokens
+from inspect_ai.tool import ToolCall
 
 _inspect_anthropic_input_tokens_name = AnthropicAPI.input_tokens_name
+_inspect_google_count_tokens = GoogleGenAIAPI.count_tokens
 _inspect_grok_params = GrokAPI._grok_params
+_inspect_openrouter_completion_params = OpenRouterAPI.completion_params
+_GEMINI_COUNT_ANCHOR = "."
+_GEMINI_SKIP_SIGNATURE = base64.b64encode(b"skip_thought_signature_validator").decode()
+_GEMINI_ANCHOR_TOKENS: dict[str, int] = {}
+_OPENROUTER_NATIVE_MAX_MODELS = frozenset(
+    {
+        "meta/muse-wonder",
+        "meta/muse-spark-1.3",
+        "moonshotai/kimi-k3",
+    }
+)
 
 
 def register_model_info() -> None:
@@ -40,6 +69,24 @@ def register_model_info() -> None:
         cost=_cost(5.0, 30.0, 0.5, cache_write=6.25),
     )
     _register(
+        ("openai/gpt-6-sol",),
+        organization="OpenAI",
+        model="GPT-6 Sol",
+        context_length=1_050_000,
+        output_tokens=128_000,
+        input_tokens=922_000,
+        cost=_cost(2.0, 10.0, 0.20, cache_write=2.5),
+    )
+    _register(
+        ("openai/gpt-6-luna",),
+        organization="OpenAI",
+        model="GPT-6 Luna",
+        context_length=1_050_000,
+        output_tokens=128_000,
+        input_tokens=922_000,
+        cost=_cost(0.10, 0.50, 0.01, cache_write=0.125),
+    )
+    _register(
         ("anthropic/claude-haiku-4-5",),
         organization="Anthropic",
         model="Claude Haiku 4.5",
@@ -62,6 +109,22 @@ def register_model_info() -> None:
         context_length=1_000_000,
         output_tokens=128_000,
         cost=_cost(5.0, 25.0, 0.50, cache_write=6.25),
+    )
+    _register(
+        ("anthropic/claude-opus-5-5",),
+        organization="Anthropic",
+        model="Claude Opus 5.5",
+        context_length=1_000_000,
+        output_tokens=128_000,
+        cost=_cost(4.0, 20.0, 0.20, cache_write=5.0),
+    )
+    _register(
+        ("anthropic/claude-fable-5-1",),
+        organization="Anthropic",
+        model="Claude Fable 5.1",
+        context_length=1_000_000,
+        output_tokens=128_000,
+        cost=_cost(10.0, 50.0, 0.25, cache_write=12.5),
     )
     _register(
         ("anthropic/claude-fable-5",),
@@ -94,6 +157,15 @@ def register_model_info() -> None:
         context_length=1_048_576,
         output_tokens=65_536,
         cost=_cost(2.0, 12.0, 0.20),
+    )
+    # introductory pricing through 2026-11-30; $4 / $20 / $0.20 thereafter
+    _register(
+        ("google/gemini-4-argon",),
+        organization="Google",
+        model="Gemini 4 Argon",
+        context_length=1_048_576,
+        output_tokens=65_536,
+        cost=_cost(2.0, 10.0, 0.10),
     )
     _register(
         ("z-ai/glm-5.2", "openrouter/z-ai/glm-5.2"),
@@ -158,9 +230,27 @@ def register_model_info() -> None:
     )
     set_model_info("meta/muse-spark-1.3", muse)
     set_model_info("openrouter/meta/muse-spark-1.3", muse)
+    muse_wonder = ModelInfo(
+        organization="Meta",
+        model="Muse Wonder",
+        snapshot="20261012",
+        context_length=1_048_576,
+        reasoning=True,
+        cost=ModelCost(
+            input=4.0,
+            output=20.0,
+            input_cache_write=4.0,
+            input_cache_read=0.20,
+        ),
+    )
+    set_model_info("meta/muse-wonder", muse_wonder)
+    set_model_info("openrouter/meta/muse-wonder", muse_wonder)
     _enable_anthropic_long_context()
     _enable_gpt6_inspect_routing()
     _enable_grok46_xhigh()
+    _disable_grok_tokenize_api()
+    _enable_openrouter_native_max()
+    _enable_gemini_fragment_token_counts()
 
 
 def _cost(
@@ -249,3 +339,106 @@ def _enable_grok46_xhigh() -> None:
 
     grok_params._bixbench3_grok46 = True  # type: ignore[attr-defined]
     GrokAPI._grok_params = grok_params  # type: ignore[method-assign]
+
+
+def _disable_grok_tokenize_api() -> None:
+    # inspect's grok provider counts tokens via xAI's tokenize RPC. many keys
+    # can chat but cannot tokenize; compaction only needs an estimate.
+    if getattr(GrokAPI.count_text_tokens, "_bixbench3_tiktoken", False):
+        return
+
+    async def count_text_tokens(self: GrokAPI, text: str) -> int:
+        del self
+        return _tiktoken_count_text_tokens(text)
+
+    count_text_tokens._bixbench3_tiktoken = True  # type: ignore[attr-defined]
+    GrokAPI.count_text_tokens = count_text_tokens  # type: ignore[method-assign]
+
+
+def _enable_openrouter_native_max() -> None:
+    # inspect clamps every openrouter max request to xhigh, but these models
+    # accept max natively (kimi-k3 does not list xhigh at all)
+    if getattr(OpenRouterAPI.completion_params, "_bixbench3_native_max", False):
+        return
+
+    def completion_params(
+        self: OpenRouterAPI,
+        config: GenerateConfig,
+        tools: bool,
+    ) -> dict[str, Any]:
+        params = _inspect_openrouter_completion_params(self, config, tools)
+        model_name = self.model_name.removeprefix("openrouter/")
+        if config.reasoning_effort == "max" and model_name in _OPENROUTER_NATIVE_MAX_MODELS:
+            params["extra_body"]["reasoning"]["effort"] = "max"
+        return params
+
+    completion_params._bixbench3_native_max = True  # type: ignore[attr-defined]
+    OpenRouterAPI.completion_params = completion_params  # type: ignore[method-assign]
+
+
+def _enable_gemini_fragment_token_counts() -> None:
+    # gemini 4 count_tokens enforces generation turn order (no leading model or
+    # function response turn, no trailing model turn), but inspect compaction
+    # counts the slice of messages added since its last baseline
+    if getattr(GoogleGenAIAPI.count_tokens, "_bixbench3_fragments", False):
+        return
+
+    async def count_tokens(
+        self: GoogleGenAIAPI,
+        input: str | list[ChatMessage],
+        config: GenerateConfig | None = None,
+    ) -> int:
+        if isinstance(input, str) or not input:
+            return await _inspect_google_count_tokens(self, input, config)
+        messages = _gemini_countable_messages(input)
+        if len(messages) == len(input):
+            return await _inspect_google_count_tokens(self, input, config)
+        anchor_tokens = _GEMINI_ANCHOR_TOKENS.get(self.model_name)
+        if anchor_tokens is None:
+            anchor_tokens = await _inspect_google_count_tokens(
+                self, [ChatMessageUser(content=_GEMINI_COUNT_ANCHOR)], config
+            )
+            _GEMINI_ANCHOR_TOKENS[self.model_name] = anchor_tokens
+        total = await _inspect_google_count_tokens(self, messages, config)
+        return max(total - anchor_tokens, 0)
+
+    count_tokens._bixbench3_fragments = True  # type: ignore[attr-defined]
+    GoogleGenAIAPI.count_tokens = count_tokens  # type: ignore[method-assign]
+
+
+def _gemini_countable_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
+    first = messages[0]
+    prefix: list[ChatMessage] = []
+    if isinstance(first, ChatMessageTool):
+        leading_tools: list[ChatMessageTool] = []
+        for message in messages:
+            if not isinstance(message, ChatMessageTool):
+                break
+            leading_tools.append(message)
+        prefix = [
+            ChatMessageUser(content=_GEMINI_COUNT_ANCHOR),
+            ChatMessageAssistant(
+                content=[
+                    ContentReasoning(
+                        reasoning=_GEMINI_SKIP_SIGNATURE if index == 0 else "",
+                        redacted=True,
+                        internal={"gemini_function_call_id": tool.tool_call_id or ""},
+                    )
+                    for index, tool in enumerate(leading_tools)
+                ],
+                tool_calls=[
+                    ToolCall(
+                        id=tool.tool_call_id or "",
+                        function=tool.function or "tool",
+                        arguments={},
+                    )
+                    for tool in leading_tools
+                ],
+            ),
+        ]
+    elif isinstance(first, ChatMessageAssistant):
+        prefix = [ChatMessageUser(content=_GEMINI_COUNT_ANCHOR)]
+    suffix: list[ChatMessage] = []
+    if isinstance(messages[-1], ChatMessageAssistant):
+        suffix = [ChatMessageUser(content=_GEMINI_COUNT_ANCHOR)]
+    return [*prefix, *messages, *suffix]
