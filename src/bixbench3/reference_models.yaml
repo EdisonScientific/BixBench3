@@ -14,6 +14,10 @@
       "max": "max",
       "high_xhigh_and_max_verbosity": "high"
     },
+    "openai/gpt-6": {
+      "max": "max",
+      "high_xhigh_and_max_verbosity": "high"
+    },
     "google": {
       "max": "high",
       "xhigh": "high"
@@ -24,18 +28,31 @@
     "openrouter/deepseek/deepseek-v4-flash": {
       "max": "xhigh"
     },
-    "xai/grok-4.5": {
-      "max": "high",
-      "xhigh": "high"
+    "grok/grok-4.6": {
+      "max": "xhigh"
     },
     "openrouter/moonshotai/kimi-k3": {
+      "max": "max"
+    },
+    "openrouter/meta/muse-spark-1.3": {
+      "max": "max"
+    },
+    "openrouter/meta/muse-wonder": {
       "max": "max"
     },
     "anthropic/claude-opus-5": {
       "max": "max",
       "xhigh": "xhigh"
     },
+    "anthropic/claude-opus-5-5": {
+      "max": "max",
+      "xhigh": "xhigh"
+    },
     "anthropic/claude-fable-5": {
+      "max": "max",
+      "xhigh": "xhigh"
+    },
+    "anthropic/claude-fable-5-1": {
       "max": "max",
       "xhigh": "xhigh"
     },
@@ -102,6 +119,16 @@
       "model_args": {}
     },
     {
+      "id": "google/gemini-4-argon",
+      "provider": "google",
+      "provider_env": "GEMINI_API_KEY",
+      "version": "gemini-4-argon",
+      "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "model_args": {
+        "streaming": true
+      }
+    },
+    {
       "id": "anthropic/claude-sonnet-4-6",
       "provider": "anthropic",
       "provider_env": "ANTHROPIC_API_KEY",
@@ -118,10 +145,26 @@
       "model_args": {}
     },
     {
+      "id": "anthropic/claude-opus-5-5",
+      "provider": "anthropic",
+      "provider_env": "ANTHROPIC_API_KEY",
+      "version": "claude-opus-5-5",
+      "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "model_args": {}
+    },
+    {
       "id": "anthropic/claude-fable-5",
       "provider": "anthropic",
       "provider_env": "ANTHROPIC_API_KEY",
       "version": "claude-fable-5",
+      "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "model_args": {}
+    },
+    {
+      "id": "anthropic/claude-fable-5-1",
+      "provider": "anthropic",
+      "provider_env": "ANTHROPIC_API_KEY",
+      "version": "claude-fable-5-1",
       "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
       "model_args": {}
     },
@@ -132,6 +175,72 @@
       "version": "gpt-5.5",
       "supported_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
       "model_args": {}
+    },
+    {
+      "id": "openai/gpt-6-sol",
+      "provider": "openai",
+      "provider_env": "OPENAI_API_KEY",
+      "version": "gpt-6-sol",
+      "supported_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+      "model_args": {
+        "responses_api": true
+      }
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "provider": "openai",
+      "provider_env": "OPENAI_API_KEY",
+      "version": "gpt-6-luna",
+      "supported_efforts": ["none", "low", "medium", "high", "xhigh", "max"],
+      "model_args": {
+        "responses_api": true
+      }
+    },
+    {
+      "id": "openai/gpt-6-astra",
+      "provider": "openai",
+      "provider_env": "OPENAI_API_KEY",
+      "version": "gpt-6-astra",
+      "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "model_args": {
+        "responses_api": true
+      }
+    },
+    {
+      "id": "grok/grok-4.6",
+      "provider": "grok",
+      "provider_env": "XAI_API_KEY",
+      "version": "grok-4.6",
+      "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+      "model_args": {}
+    },
+    {
+      "id": "openrouter/meta/muse-spark-1.3",
+      "provider": "openrouter",
+      "provider_env": "OPENROUTER_API_KEY",
+      "version": "meta/muse-spark-1.3-20260902",
+      "supported_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
+      "model_args": {
+        "provider": {
+          "order": ["meta"],
+          "only": ["meta"],
+          "allow_fallbacks": false
+        }
+      }
+    },
+    {
+      "id": "openrouter/meta/muse-wonder",
+      "provider": "openrouter",
+      "provider_env": "OPENROUTER_API_KEY",
+      "version": "meta/muse-wonder-20261012",
+      "supported_efforts": ["minimal", "low", "medium", "high", "xhigh", "max"],
+      "model_args": {
+        "provider": {
+          "order": ["meta"],
+          "only": ["meta"],
+          "allow_fallbacks": false
+        }
+      }
     },
     {
       "id": "openrouter/z-ai/glm-5.2",

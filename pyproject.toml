@@ -18,18 +18,20 @@ keywords = [
   "reproducibility",
 ]
 dependencies = [
-    "anthropic==0.102.0",
+    "anthropic==0.121.0",
     "google-genai==2.2.0",
     "httpx==0.28.1",
+    "httpx2>=2.13.0",
     "huggingface-hub",
-    "inspect-ai==0.3.220",
+    "inspect-ai==0.3.259",
     "numpy==2.4.4",
-    "openai==2.36.0",
+    "openai==3.8.0",
     "pandas==3.0.3",
     "pyarrow==24.0.0",
     "pydantic==2.13.4",
     "pyyaml==6.0.3",
     "scipy==1.17.1",
+    "xai-sdk==1.18.0",
 ]
 
 [project.scripts]

@@ -22,7 +22,7 @@ DEFAULT_ZONE = "us-central1-a"
 DEFAULT_REGION = "us-central1"
 RUN_MACHINE_TYPE = "n2-standard-32"
 RUN_BOOT_DISK_GB = 500
-RUNTIME_IMAGE_NAME = "bixbench3-runtime-v1-0-0-r7"
+RUNTIME_IMAGE_NAME = "bixbench3-runtime-v1-0-0-r15"
 RUNTIME_IMAGE_FAMILY = "bixbench3-runtime"
 REMOTE_ROOT = "/var/lib/bixbench3"
 MESSAGE_LIMIT = 5_000
@@ -43,7 +43,9 @@ _PROVIDER_ENV = {
     "gemini": "GOOGLE_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "grok": "XAI_API_KEY",
     "xai": "XAI_API_KEY",
+    "x-ai": "XAI_API_KEY",
 }
 
 
@@ -57,6 +59,7 @@ class ReferenceModelProfile:
     version: str
     supported_efforts: tuple[str, ...]
     model_args: dict[str, JsonValue]
+    fallback_model_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +85,7 @@ class ResolvedModel:
     required_environment_keys: tuple[str, ...]
     model_args: dict[str, JsonValue]
     inspect_effort_args: tuple[str, ...]
+    fallback_model_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,10 +170,11 @@ def resolve_model(
     effort: str,
     *,
     user_model_args: dict[str, JsonValue] | None = None,
+    fallback_model_ids: tuple[str, ...] | None = None,
     catalog: ReferenceCatalog | None = None,
 ) -> ResolvedModel:
     """Resolve a reference or arbitrary Inspect model without restricting IDs."""
-    model_id = model_id.strip()
+    model_id = _canonical_inspect_model_id(model_id.strip())
     if not model_id or "/" not in model_id:
         raise ValueError("model must be an Inspect provider/model identifier")
     requested_effort = normalize_effort(effort)
@@ -186,6 +191,12 @@ def resolve_model(
     model_args = dict(profile.model_args) if profile is not None else {}
     if user_model_args:
         model_args.update(user_model_args)
+    if fallback_model_ids is None:
+        fallback_model_ids = profile.fallback_model_ids if profile is not None else ()
+    fallback_model_ids = _validate_fallback_models(
+        model_id=model_id,
+        fallback_model_ids=fallback_model_ids,
+    )
     environment_keys: list[str] = []
     provider_env = (
         profile.provider_env
@@ -194,6 +205,14 @@ def resolve_model(
     )
     if provider_env:
         environment_keys.append(provider_env)
+    for fallback_model_id in fallback_model_ids:
+        fallback_provider = fallback_model_id.split("/", 1)[0].lower()
+        fallback_env = _PROVIDER_ENV.get(
+            fallback_provider,
+            _generic_provider_env(fallback_provider),
+        )
+        if fallback_env and fallback_env not in environment_keys:
+            environment_keys.append(fallback_env)
     if catalog.adjudicator_provider_env not in environment_keys:
         environment_keys.append(catalog.adjudicator_provider_env)
     return ResolvedModel(
@@ -209,7 +228,40 @@ def resolve_model(
             requested_effort=requested_effort,
             resolved_effort=resolved_effort,
         ),
+        fallback_model_ids=fallback_model_ids,
     )
+
+
+def _canonical_inspect_model_id(model_id: str) -> str:
+    # inspect's native xAI provider is grok/; x-ai/ and xai/ are openrouter slugs
+    provider, sep, rest = model_id.partition("/")
+    if sep and provider.lower() in {"x-ai", "xai"}:
+        return f"grok/{rest}"
+    return model_id
+
+
+def _validate_fallback_models(
+    *,
+    model_id: str,
+    fallback_model_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    if len(fallback_model_ids) > 3:
+        raise ValueError("Inspect supports at most three fallback models")
+    canonical = tuple(
+        _canonical_inspect_model_id(fallback_model_id.strip())
+        for fallback_model_id in fallback_model_ids
+    )
+    if any(not fallback_model_id or "/" not in fallback_model_id for fallback_model_id in canonical):
+        raise ValueError("fallback models must be Inspect provider/model identifiers")
+    if model_id in canonical:
+        raise ValueError("primary model cannot also be a fallback model")
+    if len(set(canonical)) != len(canonical):
+        raise ValueError("fallback models must be distinct")
+    if canonical and not model_id.startswith("anthropic/"):
+        raise ValueError("fallback models are supported only for first-party Anthropic models")
+    if any(not fallback_model_id.startswith("anthropic/") for fallback_model_id in canonical):
+        raise ValueError("fallback targets must be first-party Anthropic models")
+    return canonical
 
 
 def _resolve_effort(model_id: str, requested: str) -> str:
@@ -223,8 +275,10 @@ def _resolve_effort(model_id: str, requested: str) -> str:
         return "xhigh" if requested == "max" else requested
     if "grok-4.5" in lowered:
         return "high" if requested in {"xhigh", "max"} else requested
+    if "grok-4.6" in lowered:
+        return "xhigh" if requested == "max" else requested
     if lowered.startswith("openai/") or lowered.startswith("gpt-"):
-        if "gpt-5.6" in lowered:
+        if "gpt-5.6" in lowered or "gpt-6" in lowered:
             return requested
         return "xhigh" if requested == "max" else requested
     if lowered.startswith("google/") or "gemini" in lowered:
@@ -235,6 +289,7 @@ def _resolve_effort(model_id: str, requested: str) -> str:
                 marker in lowered
                 for marker in (
                     "claude-opus-5",
+                    "claude-fable-5-1",
                     "claude-fable-5",
                     "claude-opus-4-8",
                     "claude-opus-4-6",
@@ -245,7 +300,12 @@ def _resolve_effort(model_id: str, requested: str) -> str:
             return "high"
         if requested == "xhigh" and not any(
             marker in lowered
-            for marker in ("claude-opus-5", "claude-fable-5", "claude-opus-4-8")
+            for marker in (
+                "claude-opus-5",
+                "claude-fable-5-1",
+                "claude-fable-5",
+                "claude-opus-4-8",
+            )
         ):
             return "high"
     return requested
@@ -268,6 +328,7 @@ def _inspect_effort_args(
                 "claude-opus-4-7",
                 "claude-opus-4-6",
                 "claude-opus-5",
+                "claude-fable-5-1",
                 "claude-fable-5",
                 "claude-sonnet-4-6",
                 "claude-opus-4-5",
@@ -313,6 +374,11 @@ def _parse_reference_profile(
     if not isinstance(raw_model_args, dict):
         raise ValueError(f"{source}: model_args must be a mapping")
     model_args = _json_mapping(raw_model_args, f"{source}: model_args")
+    fallback_model_ids = _optional_string_list(
+        row,
+        "fallback_models",
+        source,
+    )
     return ReferenceModelProfile(
         model_id=model_id,
         provider=provider,
@@ -320,6 +386,7 @@ def _parse_reference_profile(
         version=_required_string(row, "version", source),
         supported_efforts=tuple(efforts),
         model_args=model_args,
+        fallback_model_ids=fallback_model_ids,
     )
 
 
@@ -351,6 +418,17 @@ def _required_mapping(
     if not isinstance(result, dict):
         raise ValueError(f"{source}: {key} must be a mapping")
     return result
+
+
+def _optional_string_list(
+    value: dict[object, object],
+    key: str,
+    source: str,
+) -> tuple[str, ...]:
+    result = value.get(key, [])
+    if not isinstance(result, list) or any(not isinstance(item, str) for item in result):
+        raise ValueError(f"{source}: {key} must be a list of strings")
+    return tuple(item.strip() for item in result)
 
 
 def _required_string(value: dict[object, object], key: str, source: str) -> str:

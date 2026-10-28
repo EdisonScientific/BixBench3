@@ -26,6 +26,7 @@ from bixbench3.gcp_runner import (
     remote_builder_prepare_script,
     remote_prepare_script,
     remote_run_script,
+    remote_run_service_unit,
     remote_runtime_build_script,
     remote_runtime_smoke_script,
     required_environment_keys,
@@ -92,8 +93,8 @@ def test_score_only_plan_has_fixed_vm_and_no_service_account(
     assert "--machine-type=n2-standard-32" in create
     assert "--boot-disk-size=500GB" in create
     assert (
-        "--source-machine-image=projects/example-project/global/machineImages/"
-        "bixbench3-runtime-v1-0-0-r7"
+        "--image=projects/example-project/global/images/"
+            "bixbench3-runtime-v1-0-0-r15"
     ) in create
     assert "--no-service-account" in create
     assert "--no-scopes" in create
@@ -149,6 +150,56 @@ def test_full_bundle_uses_default_compute_service_account(
     }
 
 
+def test_fable_5_1_fallback_is_passed_to_inspect(
+    task: TaskSpec,
+    tmp_path: Path,
+) -> None:
+    runner = GCPRunner(
+        project="example-project",
+        executor=RecordingExecutor(),
+        runs_root=tmp_path,
+        repo_root=tmp_path,
+    )
+    model = resolve_model(
+        "anthropic/claude-fable-5-1",
+        "max",
+        fallback_model_ids=("anthropic/claude-opus-5",),
+    )
+    plan = runner.build_run_plan(
+        task=task,
+        model=model,
+        results_bucket="gs://my-existing-results/benchmark",
+        default_service_account="123456-compute@developer.gserviceaccount.com",
+    )
+
+    assert plan.public_summary()["fallback_models"] == ["anthropic/claude-opus-5"]
+    fallback_flag = plan.inspect_argv.index("--fallback-models")
+    assert plan.inspect_argv[fallback_flag + 1] == "claude-opus-5"
+    assert plan.inspect_argv[-2:] == ("--effort", "max")
+
+
+def test_opus_5_5_explicit_fallback_is_passed_to_inspect(
+    task: TaskSpec,
+    tmp_path: Path,
+) -> None:
+    runner = GCPRunner(
+        project="example-project",
+        executor=RecordingExecutor(),
+        runs_root=tmp_path,
+        repo_root=tmp_path,
+    )
+    plan = runner.build_run_plan(
+        task=task,
+        model=resolve_model("anthropic/claude-opus-5-5", "max", fallback_model_ids=("anthropic/claude-opus-5",)),
+        results_bucket="gs://my-existing-results/benchmark",
+        default_service_account="123456-compute@developer.gserviceaccount.com",
+    )
+
+    fallback_flag = plan.inspect_argv.index("--fallback-models")
+    assert plan.inspect_argv[fallback_flag + 1] == "claude-opus-5"
+    assert plan.public_summary()["fallback_models"] == ["anthropic/claude-opus-5"]
+
+
 def test_first_run_disk_is_balanced_and_loader_is_temporary(
     task: TaskSpec,
     tmp_path: Path,
@@ -191,12 +242,12 @@ def test_commands_never_contain_api_key_values(
     plan = runner.build_run_plan(
         task=task,
         model=resolve_model("openai/gpt-5.5", "high"),
-        results_bucket=None,
+        results_bucket="gs://results-bucket/prefix",
     )
 
     flattened = "\n".join(argument for command in plan.commands.values() for argument in command)
     assert secret not in flattened
-    assert "/dev/shm/bixbench3.env" in flattened
+    assert "/run/bixbench3/credentials.env" in flattened
     assert secret in environment_file({"OPENAI_API_KEY": secret})
 
 
@@ -240,8 +291,12 @@ def test_cli_exposes_lifecycle_commands_and_requires_effort() -> None:
         "status",
         "complete",
         "cancel",
+        "monitor",
         "grade",
     }
+    monitor = parser.parse_args(["monitor", "--project", "example-project"])
+    assert monitor.interval == 1800
+    assert monitor.once is False
 
     with pytest.raises(SystemExit):
         parser.parse_args(
@@ -489,8 +544,8 @@ def test_scp_staged_case_and_grade_only_after_inspect(
     assert "--recurse" in copy_command
     script = remote_run_script(plan, RuntimeSettings())
     inspect_at = script.index("inspect_harness/tasks.py@bixbench3_cases")
-    outputs_at = script.index("/outputs/.")
-    ground_truth_at = script.index("/host_ground_truth")
+    outputs_at = script.index("/outputs/.", inspect_at)
+    ground_truth_at = script.index("/host_ground_truth", inspect_at)
     grade_at = script.index("grade_existing_artifacts(")
     judge_at = script.index("run_process_judge(")
     redaction_at = script.index("secret_values:")
@@ -499,6 +554,42 @@ def test_scp_staged_case_and_grade_only_after_inspect(
     assert "write_status judging judging" in script
     assert "huggingface.co" not in script
     assert "bixbench3 grade --task" not in script
+
+
+def test_run_service_keeps_secrets_only_in_memory(
+    task: TaskSpec,
+    tmp_path: Path,
+) -> None:
+    runner = GCPRunner(
+        project="example-project",
+        executor=RecordingExecutor(),
+        runs_root=tmp_path,
+        repo_root=tmp_path,
+    )
+    plan = runner.build_run_plan(
+        task=task,
+        model=resolve_model("openai/gpt-5.5", "high"),
+        results_bucket="gs://results-bucket/prefix",
+    )
+
+    unit = remote_run_service_unit()
+    script = remote_run_script(plan, RuntimeSettings())
+
+    assert "WantedBy=multi-user.target" in unit
+    assert "ConditionPathExists=/run/bixbench3/credentials.env" in unit
+    assert "install -d -m 0700 /run/bixbench3" in remote_prepare_script(RuntimeSettings())
+    assert "ConditionPathExists=!/var/lib/bixbench3/.finished" in unit
+    assert "ExecStart=/bin/bash /var/lib/bixbench3/run.sh" in unit
+    assert "ExecStopPost=/usr/bin/rm -f /run/bixbench3/credentials.env" in unit
+    assert "mountpoint -q /mnt/bixbench3-data || mount -o ro,noload" in script
+    assert script.count(". /run/bixbench3/credentials.env || exit 97") == 2
+    assert "rm -f /run/bixbench3/credentials.env" in script
+    assert "touch /var/lib/bixbench3/.finished" in script
+    assert "write_status interrupted issue" in script
+    assert "attempts/" not in script
+    assert "redaction_status=0" in script
+    assert 'if [ "$redaction_status" -eq 0 ]; then' in script
+    subprocess.run(("bash", "-n"), input=script, text=True, check=True)
 
 
 def test_runtime_source_archive_is_clean_and_deterministic(
@@ -571,6 +662,8 @@ def test_run_vm_preparation_grants_docker_socket_access() -> None:
     script = remote_prepare_script(RuntimeSettings())
 
     assert "chmod 0666 /var/run/docker.sock" in script
+    assert "systemctl mask --now unattended-upgrades.service" in script
+    assert "bixbench3-run|docker|containerd" in script
 
 
 def test_runtime_build_creates_both_private_compose_images() -> None:

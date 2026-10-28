@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="additional Inspect model argument; repeat as needed",
     )
     run.add_argument(
+        "--fallback-model",
+        action="append",
+        default=[],
+        help=(
+            "first-party Anthropic model used when the primary model's safety "
+            "classifier declines; repeat for an ordered chain"
+        ),
+    )
+    run.add_argument(
         "--results-bucket",
         help="existing gs:// bucket/prefix for the full run bundle",
     )
@@ -86,6 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
         lifecycle = commands.add_parser(name, help=help_text)
         lifecycle.add_argument("--run", required=True, help="run ID printed by the run command")
         lifecycle.add_argument("--project", required=True, help="GCP project ID")
+
+    monitor = commands.add_parser("monitor", help="check every uncollected run every 30 minutes")
+    monitor.add_argument("--project", required=True, help="GCP project ID")
+    monitor.add_argument("--once", action="store_true", help="check once and exit")
+    monitor.add_argument("--interval", type=int, default=1800, help="seconds between checks")
 
     grade = commands.add_parser(
         "grade",
@@ -115,6 +130,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _complete(arguments)
         if arguments.command == "cancel":
             return _cancel(arguments)
+        if arguments.command == "monitor":
+            return _monitor(arguments)
         if arguments.command == "grade":
             return _grade(arguments)
     except (RuntimeError, ValueError) as error:
@@ -140,6 +157,9 @@ def _run(arguments: argparse.Namespace) -> int:
         arguments.model,
         arguments.effort,
         user_model_args=model_args,
+        fallback_model_ids=(
+            tuple(arguments.fallback_model) if arguments.fallback_model else None
+        ),
     )
     runner = _runner(arguments.project)
     result = runner.run_task(
@@ -166,6 +186,9 @@ def _print_run_follow_up(result: dict[str, Any]) -> None:
     print("\nNext steps:")
     print("1. Monitor the detached run:")
     print(f"   {status}")
+    gcp = result.get("gcp")
+    if isinstance(gcp, dict) and isinstance(gcp.get("project"), str):
+        print(f"   uv run bixbench3 monitor --project {gcp['project']}")
     print("2. When status reports succeeded or failed, collect grades and delete the VM:")
     print(f"   {complete}")
     print("3. To stop early and delete the VM:")
@@ -207,6 +230,33 @@ def _cancel(arguments: argparse.Namespace) -> int:
     result = _runner(arguments.project).cancel_run(arguments.run)
     _print_json(result)
     return 0
+
+
+def _monitor(arguments: argparse.Namespace) -> int:
+    if arguments.interval < 1:
+        raise ValueError("monitor interval must be positive")
+    runner = _runner(arguments.project)
+    previous: dict[str, tuple[object, object]] = {}
+    while True:
+        report = runner.monitor_once()
+        for run in report["runs"]:
+            run_id = run.get("run_id")
+            health = run.get("health")
+            if isinstance(run_id, str) and isinstance(health, dict):
+                current = (health.get("inspect_pid"), health.get("cpu_ticks"))
+                if (run.get("phase") == "agent_running" and run.get("flag") is None
+                        and current[0] is not None and previous.get(run_id) == current):
+                    run["flag"] = "issue"
+                    run["activity"] = "no CPU activity observed since the previous check"
+                previous[run_id] = current
+            if run.get("flag"):
+                print(f"{run['flag']}: {run.get('run_id', run.get('manifest_path'))}: "
+                      f"{run.get('phase', run.get('error', 'unknown'))}", file=sys.stderr, flush=True)
+        _print_json(report)
+        sys.stdout.flush()
+        if arguments.once:
+            return 1 if any(run.get("flag") == "issue" for run in report["runs"]) else 0
+        time.sleep(arguments.interval)
 
 
 def _grade(arguments: argparse.Namespace) -> int:

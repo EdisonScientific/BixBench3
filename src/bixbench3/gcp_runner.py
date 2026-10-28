@@ -52,10 +52,12 @@ type Argv = tuple[str, ...]
 _CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 _DEVICE_NAME = "bixbench3-data"
 _DATA_MOUNT = "/mnt/bixbench3-data"
-_SECRET_ENV_PATH = "/dev/shm/bixbench3.env"
+_SECRET_ENV_PATH = "/run/bixbench3/credentials.env"
 _RUN_SCRIPT_PATH = "/var/lib/bixbench3/run.sh"
 _RUN_STATUS_PATH = "/var/lib/bixbench3/status.json"
+_RUN_FINISHED_PATH = "/var/lib/bixbench3/.finished"
 _RUN_SERVICE = "bixbench3-run.service"
+_RUN_SERVICE_PATH = f"/etc/systemd/system/{_RUN_SERVICE}"
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _MODEL_ARG_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*")
 _GCS_URI = re.compile(r"gs://([a-z0-9][a-z0-9._-]{1,221}[a-z0-9])(?:/(.*))?")
@@ -173,6 +175,7 @@ class RunPlan:
             "task_id": self.task.task_id,
             "paper_id": self.task.paper_id,
             "model": self.model.model_id,
+            "fallback_models": list(self.model.fallback_model_ids),
             "reference_model": self.model.is_reference,
             "requested_effort": self.model.requested_effort,
             "resolved_effort": self.model.resolved_effort,
@@ -417,6 +420,10 @@ class GCPRunner:
                 plan.commands["install_run_script"],
                 input_text=remote_run_script(plan, self.settings),
             )
+            self.executor.run(
+                plan.commands["install_run_service"],
+                input_text=remote_run_service_unit(),
+            )
             self.executor.run(plan.commands["start_run_service"])
         except subprocess.CalledProcessError as error:
             if vm_created:
@@ -424,6 +431,11 @@ class GCPRunner:
                     "submission failed; stopping the run VM for debugging",
                     file=sys.stderr,
                     flush=True,
+                )
+                self.executor.run(
+                    plan.commands["scrub_run_credentials"],
+                    check=False,
+                    capture_output=True,
                 )
                 cleanup = self._cleanup_run_vm(plan, succeeded=False)
                 manifest["cleanup"] = cleanup
@@ -466,16 +478,28 @@ class GCPRunner:
         remote = self._read_remote_status(vm_name, zone) if vm["state"] == "RUNNING" else None
         effective_status = manifest.get("status", "unknown")
         phase = manifest.get("phase", "unknown")
+        health: dict[str, Any] | None = None
         if isinstance(remote, dict):
             effective_status = remote.get("status", effective_status)
             phase = remote.get("phase", phase)
-        elif vm["state"] == "MISSING" and effective_status not in {
-            "succeeded",
-            "failed",
-            "cancelled",
-        }:
-            effective_status = "failed"
-            phase = "vm_missing"
+        if vm["state"] == "RUNNING" and effective_status == "running":
+            health = self._read_remote_health(vm_name, zone)
+            if health is None:
+                effective_status, phase = "issue", "ssh_unavailable"
+            elif health.get("service_state") != "active":
+                effective_status, phase = "issue", "service_inactive"
+            elif phase == "agent_running" and not health.get("inspect_running"):
+                updated_at = remote.get("updated_at") if isinstance(remote, dict) else None
+                try:
+                    age = (datetime.now(UTC) - datetime.fromisoformat(updated_at)).total_seconds() if isinstance(updated_at, str) else float("inf")
+                except ValueError:
+                    age = float("inf")
+                if age > 120:
+                    effective_status, phase = "issue", "inspect_not_running"
+        elif vm["state"] == "MISSING" and effective_status not in {"succeeded", "failed", "cancelled"}:
+            effective_status, phase = "failed", "vm_missing"
+        elif vm["state"] not in {"RUNNING", "MISSING"} and effective_status not in {"succeeded", "failed", "cancelled"}:
+            effective_status, phase = "issue", "vm_stopped"
         terminal = effective_status in {"succeeded", "failed", "cancelled"}
         return {
             "run_id": manifest.get("run_id", run_id),
@@ -487,10 +511,11 @@ class GCPRunner:
             "phase": phase,
             "terminal": terminal,
             "remote": remote,
-            "next_command": (
-                lifecycle_command("complete", run_id, self.project)
-                if terminal
-                else lifecycle_command("status", run_id, self.project)
+            "health": health,
+            "next_command": lifecycle_command(
+                "complete" if terminal else "cancel" if effective_status == "issue" else "status",
+                run_id,
+                self.project,
             ),
         }
 
@@ -620,7 +645,14 @@ class GCPRunner:
             capture_output=True,
         )
         if result.returncode != 0:
-            return {"state": "MISSING"}
+            diagnostic = "\n".join((result.stdout or "", result.stderr or ""))
+            if "the resource" in diagnostic.lower() and "was not found" in diagnostic.lower():
+                return {"state": "MISSING"}
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                f"cannot describe run VM {vm_name!r}; gcloud authentication or API "
+                f"access may have failed: {detail or f'exit status {result.returncode}'}"
+            )
         value = parse_json_object(result.stdout or "{}", "run VM metadata")
         return {"state": str(value.get("status", "UNKNOWN")), "metadata": value}
 
@@ -638,6 +670,81 @@ class GCPRunner:
         if result.returncode != 0 or not (result.stdout or "").strip():
             return None
         return parse_json_object(result.stdout, "remote run status")
+
+    def _read_remote_health(self, vm_name: str, zone: str) -> dict[str, Any] | None:
+        result = self.executor.run(
+            lifecycle_ssh_argv(self.project, vm_name, zone, ("sudo", "python3", "-")),
+            input_text=remote_health_script(),
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0 or not (result.stdout or "").strip():
+            return None
+        return parse_json_object(result.stdout, "remote service health")
+
+    def monitor_once(self) -> dict[str, Any]:
+        """Check local runs and discover unmatched project run VMs."""
+        results: list[dict[str, Any]] = []
+        known_vms: set[tuple[str, str]] = set()
+        for path in sorted(self.runs_root.glob("*/*/*/run_manifest.json")):
+            try:
+                manifest = parse_json_object(path.read_text(encoding="utf-8"), str(path))
+                gcp = manifest.get("gcp")
+                if not isinstance(gcp, dict) or gcp.get("project") != self.project:
+                    continue
+                known_vms.add(lifecycle_vm_identity(manifest))
+                cleanup_path = path.parent / "cleanup.json"
+                if cleanup_path.exists():
+                    cleanup = parse_json_object(cleanup_path.read_text(encoding="utf-8"), str(cleanup_path))
+                    if cleanup.get("succeeded") is True:
+                        continue
+                run_id = manifest.get("run_id")
+                if not isinstance(run_id, str):
+                    raise ValueError("missing run ID")
+                result = self.status_run(run_id)
+                result["flag"] = (
+                    "issue" if cleanup_path.exists()
+                    else "complete" if result["status"] == "succeeded"
+                    else "issue" if result["status"] in {"issue", "failed"}
+                    else None
+                )
+                results.append(result)
+            except (OSError, RuntimeError, ValueError) as error:
+                results.append({"manifest_path": str(path), "flag": "issue", "error": str(error)})
+        try:
+            for vm_name, zone, state in self._list_run_vms():
+                if (vm_name, zone) in known_vms:
+                    continue
+                health = self._read_remote_health(vm_name, zone) if state == "RUNNING" else None
+                results.append({
+                    "vm_name": vm_name, "vm_state": state, "zone": zone,
+                    "health": health, "phase": "orphan_run_vm", "flag": "issue",
+                })
+        except (OSError, RuntimeError, ValueError) as error:
+            results.append({"phase": "vm_inventory_unavailable", "flag": "issue", "error": str(error)})
+        return {"checked_at": datetime.now(UTC).isoformat(), "runs": results}
+
+    def _list_run_vms(self) -> list[tuple[str, str, str]]:
+        result = self.executor.run(
+            ("gcloud", "--project", self.project, "compute", "instances", "list", "--format=json"),
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"cannot list run VMs: {(result.stderr or '').strip()}")
+        values = json.loads(result.stdout or "[]")
+        if not isinstance(values, list):
+            raise ValueError("run VM inventory must be a list")
+        run_vms: list[tuple[str, str, str]] = []
+        for vm in values:
+            if not isinstance(vm, dict):
+                continue
+            name, zone, labels = vm.get("name"), vm.get("zone"), vm.get("labels")
+            if (isinstance(name, str) and name.startswith("arb-run-")
+                    and isinstance(zone, str) and isinstance(labels, dict)
+                    and labels.get("benchmark") == "bixbench3"):
+                run_vms.append((name, zone.rsplit("/", 1)[-1], str(vm.get("status", "UNKNOWN"))))
+        return run_vms
 
     def _collect_lifecycle_files(self, vm_name: str, zone: str, local_dir: Path) -> None:
         local_dir.mkdir(parents=True, exist_ok=True)
@@ -768,7 +875,7 @@ class GCPRunner:
         )
         self._preflight(require_artifact_registry=False, results_bucket=None)
         print(
-            f"[2/10] checking for existing machine image {plan.image_name}",
+            f"[2/10] checking for existing custom image {plan.image_name}",
             file=sys.stderr,
             flush=True,
         )
@@ -849,7 +956,7 @@ class GCPRunner:
                 ),
             )
             print(
-                f"[9/10] stopping {plan.builder_vm} and saving machine image {plan.image_name}",
+                f"[9/10] stopping {plan.builder_vm} and saving custom image {plan.image_name}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -964,7 +1071,7 @@ class GCPRunner:
                 "--project",
                 self.project,
                 "compute",
-                "machine-images",
+                "images",
                 "describe",
                 self.settings.runtime_image_name,
                 "--format=json",
@@ -1110,6 +1217,7 @@ class GCPRunner:
                 "id": plan.model.model_id,
                 "reference_profile": plan.model.is_reference,
                 "arguments": plan.model.model_args,
+                "fallback_models": list(plan.model.fallback_model_ids),
             },
             "effort": {
                 "requested": plan.model.requested_effort,
@@ -1172,8 +1280,8 @@ def build_run_commands(
         f"--boot-disk-size={settings.boot_disk_gb}GB",
         "--boot-disk-type=pd-balanced",
         (
-            "--source-machine-image="
-            f"projects/{project}/global/machineImages/{settings.runtime_image_name}"
+            "--image="
+            f"projects/{project}/global/images/{settings.runtime_image_name}"
         ),
         f"--labels={labels},run={slugify(layout.run_id, maximum=20)}",
     ]
@@ -1211,7 +1319,7 @@ def build_run_commands(
         "describe_runtime_image": (
             *base,
             "compute",
-            "machine-images",
+            "images",
             "describe",
             settings.runtime_image_name,
             "--format=json",
@@ -1336,18 +1444,38 @@ def build_run_commands(
                 f"umask 077; cat > {_RUN_SCRIPT_PATH}; chmod 0700 {_RUN_SCRIPT_PATH}",
             ),
         ),
+        "install_run_service": ssh_argv(
+            base,
+            layout.vm_name,
+            settings.zone,
+            (
+                "sudo",
+                "sh",
+                "-c",
+                f"cat > {_RUN_SERVICE_PATH}; chmod 0644 {_RUN_SERVICE_PATH}",
+            ),
+        ),
         "start_run_service": ssh_argv(
             base,
             layout.vm_name,
             settings.zone,
             (
                 "sudo",
-                "systemd-run",
-                "--unit=bixbench3-run",
-                "--property=Type=exec",
-                "--property=Restart=no",
-                "/bin/bash",
-                _RUN_SCRIPT_PATH,
+                "sh",
+                "-c",
+                f"systemctl daemon-reload && systemctl enable --now {_RUN_SERVICE}",
+            ),
+        ),
+        "scrub_run_credentials": ssh_argv(
+            base,
+            layout.vm_name,
+            settings.zone,
+            (
+                "sudo",
+                "sh",
+                "-c",
+                f"systemctl disable --now {_RUN_SERVICE} 2>/dev/null || true; "
+                f"rm -f {_SECRET_ENV_PATH}; touch {_RUN_FINISHED_PATH}",
             ),
         ),
         "collect_scores": (
@@ -1436,6 +1564,12 @@ def build_inspect_argv(
         if _MODEL_ARG_NAME.fullmatch(key) is None:
             raise ValueError(f"invalid Inspect model argument name {key!r}")
         parts.extend(("-M", f"{key}={json.dumps(value, separators=(',', ':'))}"))
+    if model.fallback_model_ids:
+        fallback_targets = [
+            fallback_model_id.removeprefix("anthropic/")
+            for fallback_model_id in model.fallback_model_ids
+        ]
+        parts.extend(("--fallback-models", ",".join(fallback_targets)))
     parts.extend(model.inspect_effort_args)
     return tuple(parts)
 
@@ -1486,7 +1620,7 @@ def build_runtime_plan(
         "describe_image": (
             *base,
             "compute",
-            "machine-images",
+            "images",
             "describe",
             settings.runtime_image_name,
             "--format=json",
@@ -1521,6 +1655,7 @@ def build_runtime_plan(
             str(source_archive.resolve()),
             f"{builder}:~/bixbench3-source.tar.gz",
             zone,
+            "--scp-flag=-O",
         ),
         "copy_cellranger": (
             *base,
@@ -1529,6 +1664,7 @@ def build_runtime_plan(
             str(cellranger_tarball.resolve()),
             f"{builder}:~/cellranger-6.0.2.tar.gz",
             zone,
+            "--scp-flag=-O",
         ),
         "copy_cellranger_arc": (
             *base,
@@ -1537,6 +1673,7 @@ def build_runtime_plan(
             str(cellranger_arc_tarball.resolve()),
             f"{builder}:~/cellranger-arc-2.0.2.tar.gz",
             zone,
+            "--scp-flag=-O",
         ),
         "build_runtime": ssh_argv(
             base,
@@ -1562,11 +1699,12 @@ def build_runtime_plan(
         "create_image": (
             *base,
             "compute",
-            "machine-images",
+            "images",
             "create",
             settings.runtime_image_name,
-            f"--source-instance={builder}",
-            f"--source-instance-zone={settings.zone}",
+            f"--source-disk={builder}",
+            f"--source-disk-zone={settings.zone}",
+            f"--family={settings.runtime_image_family}",
             (f"--description=BixBench3 {BENCHMARK_VERSION}; runtime hash {build_hash}"),
         ),
         "delete_builder": (
@@ -1901,6 +2039,13 @@ def remote_prepare_script(settings: RuntimeSettings) -> str:
     remote_root = shlex.quote(settings.remote_root)
     mount = shlex.quote(_DATA_MOUNT)
     return f"""set -euo pipefail
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/bixbench3.conf <<'EOF'
+$nrconf{{restart}} = 'l';
+$nrconf{{override_rc}}{{qr(^(bixbench3-run|docker|containerd)\\.service$)}} = 0;
+EOF
+systemctl mask --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer
+install -d -m 0700 /run/bixbench3
 mkdir -p {remote_root}/artifact_grades {remote_root}/agent_artifacts {remote_root}/inspect_logs {remote_root}/outputs {remote_root}/broker {remote_root}/broker_logs {remote_root}/broker_cache {remote_root}/workspace/approved_web {mount}
 device=/dev/disk/by-id/google-{_DEVICE_NAME}
 for attempt in $(seq 1 30); do
@@ -1940,6 +2085,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import sys
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 manifest_url, mount_text, expected_manifest_sha = sys.argv[1:]
@@ -1956,6 +2102,16 @@ manifest = json.loads(manifest_bytes)
 entries = manifest.get("objects") or manifest.get("files") or manifest.get("artifacts")
 if not isinstance(entries, list):
     raise RuntimeError("input manifest has no object list")
+
+def encoded_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((
+        parts.scheme,
+        parts.netloc,
+        quote(parts.path, safe="/%"),
+        quote(parts.query, safe="=&%"),
+        parts.fragment,
+    ))
 
 def relative_path(entry: dict[str, object]) -> PurePosixPath:
     raw = entry.get("relative_path") or entry.get("object_path") or entry.get("path")
@@ -1984,7 +2140,7 @@ for entry_value in entries:
             continue
         raise RuntimeError(f"existing destination checksum mismatch: {{destination}}")
     partial = destination.with_name(destination.name + ".partial")
-    request = Request(url, headers={{"User-Agent": "bixbench3/{__version__}"}})
+    request = Request(encoded_url(url), headers={{"User-Agent": "bixbench3/{__version__}"}})
     digest = hashlib.sha256()
     with urlopen(request, timeout=120) as response, partial.open("wb") as output:
         while chunk := response.read(8 * 1024 * 1024):
@@ -2009,6 +2165,72 @@ umount {_DATA_MOUNT}
 """
 
 
+def remote_health_script() -> str:
+    return """import json
+import os
+from pathlib import Path
+import subprocess
+
+state = subprocess.run(
+    ("systemctl", "is-active", "bixbench3-run.service"),
+    capture_output=True, text=True, check=False,
+).stdout.strip()
+main = subprocess.run(
+    ("systemctl", "show", "bixbench3-run.service", "-p", "MainPID", "--value"),
+    capture_output=True, text=True, check=False,
+).stdout.strip()
+main_pid = int(main) if main.isdigit() else 0
+processes = {}
+for entry in os.scandir("/proc"):
+    if not entry.name.isdigit():
+        continue
+    try:
+        stat = (Path(entry.path) / "stat").read_text().rpartition(") ")[2].split()
+        args = (Path(entry.path) / "cmdline").read_bytes().replace(b"\\0", b" ").decode(errors="replace")
+        processes[int(entry.name)] = (int(stat[1]), int(stat[11]) + int(stat[12]), args)
+    except (OSError, IndexError, ValueError):
+        continue
+by_parent = {}
+for pid, (parent, _, _) in processes.items():
+    by_parent.setdefault(parent, []).append(pid)
+children = set()
+pending = [main_pid] if main_pid else []
+while pending:
+    pid = pending.pop()
+    if pid not in children:
+        children.add(pid)
+        pending.extend(by_parent.get(pid, []))
+inspect = [pid for pid in children if pid in processes and "inspect eval" in processes[pid][2]]
+print(json.dumps({
+    "service_state": state,
+    "inspect_running": bool(inspect),
+    "inspect_pid": inspect[0] if inspect else None,
+    "cpu_ticks": sum(processes[pid][1] for pid in children if pid in processes),
+}))
+"""
+
+
+def remote_run_service_unit() -> str:
+    """Return the persistent systemd unit used to survive VM reboots."""
+    return f"""[Unit]
+Description=BixBench3 benchmark run
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists={_SECRET_ENV_PATH}
+ConditionPathExists=!{_RUN_FINISHED_PATH}
+
+[Service]
+Type=exec
+ExecStart=/bin/bash {_RUN_SCRIPT_PATH}
+ExecStopPost=/usr/bin/rm -f {_SECRET_ENV_PATH}
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 def remote_run_script(plan: RunPlan, settings: RuntimeSettings) -> str:
     inspect_command = shlex.join(plan.inspect_argv)
     remote_root = shlex.quote(settings.remote_root)
@@ -2027,6 +2249,14 @@ if [ "$upload_status" -ne 0 ]; then
   run_status="$upload_status"
 fi
 """
+    upload_if_redacted = (
+        f"""if [ "$redaction_status" -eq 0 ]; then
+{upload}
+fi
+"""
+        if upload
+        else ""
+    )
     return f"""set -uo pipefail
 write_status() {{
   python3 - "$1" "$2" "$3" {_RUN_STATUS_PATH} <<'PY'
@@ -2050,18 +2280,31 @@ temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\\n", encodi
 temporary.replace(path)
 PY
 }}
+run_status=0
+reached_end=0
 finish_run() {{
   exit_status=$?
   rm -f {_SECRET_ENV_PATH}
-  if [ "$exit_status" -eq 0 ]; then
+  touch {_RUN_FINISHED_PATH}
+  systemctl disable {_RUN_SERVICE} >/dev/null 2>&1 || true
+  if [ "$reached_end" -ne 1 ]; then
+    write_status interrupted issue "$exit_status"
+  elif [ "$exit_status" -eq 0 ]; then
     write_status completed succeeded "$exit_status"
   else
     write_status failed failed "$exit_status"
   fi
 }}
 trap finish_run EXIT
+touch {_RUN_FINISHED_PATH}
+
+device=/dev/disk/by-id/google-{_DEVICE_NAME}
+mkdir -p {_DATA_MOUNT}
+mountpoint -q {_DATA_MOUNT} || mount -o ro,noload "$device" {_DATA_MOUNT} || exit 96
+test -d {_DATA_MOUNT}/data || exit 96
+
 write_status agent_running running ""
-test -f {_SECRET_ENV_PATH}
+test -r {_SECRET_ENV_PATH}
 export BIXBENCH3_DATA_DIR={shlex.quote(_DATA_MOUNT + "/data")}
 export BIXBENCH3_OUTPUTS_DIR={settings.remote_root}/outputs
 export BIXBENCH3_WORKSPACE_DIR={settings.remote_root}/workspace
@@ -2074,7 +2317,6 @@ export BIXBENCH3_BROKER_CACHE_DIR={settings.remote_root}/broker_cache
 export BIXBENCH3_BROKER_HOST_PORT=18080
 export BIXBENCH3_BROKER_ENDPOINT=http://127.0.0.1:18080
 export BIXBENCH3_BROKER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-run_status=0
 cd /opt/bixbench3
 python3 - {remote_root} <<'PY'
 from __future__ import annotations
@@ -2102,7 +2344,7 @@ network_policy.setdefault(
 PY
 (
   set -a
-  . {_SECRET_ENV_PATH}
+  . {_SECRET_ENV_PATH} || exit 97
   set +a
   {inspect_command}
 ) || run_status=$?
@@ -2141,7 +2383,7 @@ write_status judging judging "$run_status"
 judge_status=0
 (
   set -a
-  . {_SECRET_ENV_PATH}
+  . {_SECRET_ENV_PATH} || exit 97
   set +a
   uv run python - {remote_root} {remote_root}/dataset/case.json <<'PY'
 from __future__ import annotations
@@ -2157,7 +2399,8 @@ run_process_judge(
 )
 PY
 ) || judge_status=$?
-python3 - {remote_root} {_SECRET_ENV_PATH} <<'PY'
+redaction_status=0
+python3 - {remote_root} {_SECRET_ENV_PATH} <<'PY' || redaction_status=$?
 from __future__ import annotations
 from pathlib import Path
 import re
@@ -2187,7 +2430,7 @@ patterns = (
     (re.compile(rb"sk-or-[A-Za-z0-9_-]+"), b"<redacted:OPENROUTER_API_KEY>"),
     (re.compile(rb"AIza[A-Za-z0-9_-]+"), b"<redacted:GOOGLE_API_KEY>"),
 )
-for relative in ("inspect_logs", "outputs", "agent_artifacts", "artifact_grades", "grade.json", "judge.json", "broker_logs"):
+for relative in ("inspect_logs", "outputs", "agent_artifacts", "artifact_grades", "grade.json", "judge.json", "broker_logs", "attempts"):
     base_path = root / relative
     if not base_path.exists():
         continue
@@ -2203,6 +2446,9 @@ for relative in ("inspect_logs", "outputs", "agent_artifacts", "artifact_grades"
         if redacted != data:
             path.write_bytes(redacted)
 PY
+if [ "$redaction_status" -ne 0 ]; then
+  run_status="$redaction_status"
+fi
 python3 - {remote_root}/run_manifest.json "$run_status" "$judge_status" <<'PY'
 from __future__ import annotations
 from datetime import UTC, datetime
@@ -2237,7 +2483,8 @@ else:
 value["process_judge"] = process_judge
 path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
 PY
-{upload}
+{upload_if_redacted}
+reached_end=1
 exit "$run_status"
 """
 
